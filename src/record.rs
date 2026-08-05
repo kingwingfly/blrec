@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
-use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,7 +20,6 @@ pub enum Format {
     Wav,
     Mp3,
     Flac,
-    Mp4,
     Flv,
 }
 
@@ -35,7 +33,6 @@ impl Format {
             Format::Wav => "wav",
             Format::Mp3 => "mp3",
             Format::Flac => "flac",
-            Format::Mp4 => "mp4",
             Format::Flv => "flv",
         }
     }
@@ -45,7 +42,6 @@ impl Format {
             "wav" => Some(Format::Wav),
             "mp3" => Some(Format::Mp3),
             "flac" => Some(Format::Flac),
-            "mp4" => Some(Format::Mp4),
             "flv" => Some(Format::Flv),
             _ => None,
         }
@@ -56,7 +52,7 @@ impl Format {
             Format::Wav => "pcm_s16le",
             Format::Mp3 => "libmp3lame",
             Format::Flac => "flac",
-            Format::Mp4 | Format::Flv => unreachable!(),
+            Format::Flv => unreachable!(),
         }
     }
 
@@ -65,7 +61,6 @@ impl Format {
             Format::Wav => "wav",
             Format::Mp3 => "mp3",
             Format::Flac => "flac",
-            Format::Mp4 => "mp4",
             Format::Flv => "flv",
         }
     }
@@ -241,168 +236,50 @@ impl AudioRecorder {
     }
 }
 
-// ── Download-based recording (FLV + MP4 temp) ───────────────────────
+// ── Download helper ──────────────────────────────────────────────────
 
-struct DownloadRecorder {
-    path: PathBuf,
-    filter: FlvFilter,
-}
+async fn download_connection(
+    filter: &mut FlvFilter,
+    url: &str,
+    cancel_token: &tokio_util::sync::CancellationToken,
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<ConnEnd> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(url)
+        .header("Referer", REFERER)
+        .header("User-Agent", USER_AGENT)
+        .send()
+        .await?;
 
-impl DownloadRecorder {
-    fn new(path: &Path, keep_audio: bool, keep_video: bool) -> Self {
-        Self {
-            path: path.to_path_buf(),
-            filter: FlvFilter::new(keep_audio, keep_video),
+    let mut stream = resp.bytes_stream();
+
+    loop {
+        if cancel_token.is_cancelled() {
+            return Ok(ConnEnd::Cancelled);
         }
-    }
-
-    async fn record_connection(
-        &mut self,
-        url: &str,
-        cancel_token: &tokio_util::sync::CancellationToken,
-    ) -> Result<ConnEnd> {
-        let client = reqwest::Client::new();
-        let resp = client
-            .get(url)
-            .header("Referer", REFERER)
-            .header("User-Agent", USER_AGENT)
-            .send()
-            .await?;
-
-        let mut stream = resp.bytes_stream();
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .await?;
-
-        loop {
-            if cancel_token.is_cancelled() {
-                return Ok(ConnEnd::Cancelled);
-            }
-            tokio::select! {
-                chunk = stream.next() => {
-                    match chunk {
-                        Some(Ok(bytes)) => {
-                            let output = self.filter.process(&bytes);
-                            file.write_all(output).await?;
-                        }
-                        Some(Err(e)) => {
-                            error!("Stream error: {e}");
-                            break;
-                        }
-                        None => {
-                            info!("Stream connection closed (EOF)");
-                            break;
-                        }
+        tokio::select! {
+            chunk = stream.next() => {
+                match chunk {
+                    Some(Ok(bytes)) => {
+                        let output = filter.process(&bytes);
+                        writer.write_all(output).await?;
+                    }
+                    Some(Err(e)) => {
+                        error!("Stream error: {e}");
+                        break;
+                    }
+                    None => {
+                        info!("Stream connection closed (EOF)");
+                        break;
                     }
                 }
-                _ = tokio::time::sleep(Duration::from_secs(5)) => {}
             }
+            _ = tokio::time::sleep(Duration::from_secs(5)) => {}
         }
-
-        Ok(ConnEnd::Eof)
     }
 
-    fn mark_reconnect(&mut self) {
-        self.filter.mark_reconnect();
-    }
-}
-
-// ── FLV trimming + MP4 remux ────────────────────────────────────────
-
-/// Trim trailing garbage from a truncated FLV file.  Parses forward from
-/// byte 0, validating each tag's own PreviousTagSize (which is always
-/// `11 + data_size` even after FlvFilter), and truncates after the last
-/// complete tag.
-fn trim_flv(path: &Path) -> Result<()> {
-    let mut file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
-    let file_len = file.metadata()?.len();
-    if file_len < 13 {
-        return Ok(());
-    }
-
-    // Temp FLV files are small — read the whole thing
-    file.seek(SeekFrom::Start(0))?;
-    let mut buf = vec![0u8; file_len as usize];
-    file.read_exact(&mut buf)?;
-
-    if &buf[0..3] != b"FLV" {
-        tracing::debug!("FLV file missing header — not trimming");
-        return Ok(());
-    }
-
-    let mut last_valid: u64 = 13; // after FLV header + first PreviousTagSize0
-    let mut offset = 13usize;
-
-    while offset + 15 <= buf.len() {
-        let tag_type = buf[offset] & 0x1F;
-        if tag_type != 0x08 && tag_type != 0x09 && tag_type != 0x12 {
-            offset += 1;
-            continue;
-        }
-        let data_size = ((buf[offset + 1] as usize) << 16)
-            | ((buf[offset + 2] as usize) << 8)
-            | (buf[offset + 3] as usize);
-        if data_size == 0 || data_size > 10_000_000 {
-            offset += 1;
-            continue;
-        }
-        let pts_offset = offset + 11 + data_size;
-        let tag_end = pts_offset + 4;
-        if tag_end > buf.len() {
-            offset += 1;
-            continue;
-        }
-        if buf[offset + 8] != 0 || buf[offset + 9] != 0 || buf[offset + 10] != 0 {
-            offset += 1;
-            continue;
-        }
-        // Validate this tag's own PreviousTagSize (= 11 + data_size)
-        let pts = u32::from_be_bytes([
-            buf[pts_offset], buf[pts_offset + 1],
-            buf[pts_offset + 2], buf[pts_offset + 3],
-        ]);
-        if pts as usize != 11 + data_size {
-            offset += 1;
-            continue;
-        }
-        last_valid = tag_end as u64;
-        offset = tag_end;
-    }
-
-    if last_valid < file_len {
-        file.set_len(last_valid)?;
-        let dropped = file_len - last_valid;
-        info!("Trimmed {dropped} trailing bytes from FLV (now {last_valid})");
-    }
-    Ok(())
-}
-
-fn remux_flv_to_mp4(flv_path: &Path, mp4_path: &Path) -> Result<()> {
-    trim_flv(flv_path)?;
-
-    let output = std::process::Command::new("ffmpeg")
-        .args([
-            "-v", "error",
-            "-i", &flv_path.to_string_lossy(),
-            "-c", "copy",
-            "-movflags", "+faststart",
-            "-y",
-            &mp4_path.to_string_lossy(),
-        ])
-        .output()
-        .context("Failed to spawn ffmpeg for remux")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("ffmpeg remux failed: {stderr}");
-    }
-    if !output.stderr.is_empty() {
-        tracing::debug!("ffmpeg: {}", String::from_utf8_lossy(&output.stderr).trim());
-    }
-    info!("Remuxed FLV -> MP4: {}", mp4_path.display());
-    Ok(())
+    Ok(ConnEnd::Eof)
 }
 
 // ── Main record function ────────────────────────────────────────────
@@ -499,17 +376,11 @@ async fn record_inner(
 
         recorder.lock().await.finish()?;
     } else {
-        // ── Video path (FLV / MP4) ──
+        // ── FLV path ──
         let keep_audio = !no_audio;
         let keep_video = !no_video;
 
-        let download_path = if format == Format::Mp4 {
-            dest.with_extension("tmp.flv")
-        } else {
-            dest.clone()
-        };
-
-        let mut downloader = DownloadRecorder::new(&download_path, keep_audio, keep_video);
+        let mut filter = FlvFilter::new(keep_audio, keep_video);
 
         loop {
             if cancel_token.is_cancelled() {
@@ -520,7 +391,13 @@ async fn record_inner(
             let url = fetch_url(real_id, quality).await?;
             info!("Connecting (reconnect #{reconnect_count})...");
 
-            match downloader.record_connection(&url, cancel_token).await {
+            let mut file = tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&dest)
+                .await?;
+
+            match download_connection(&mut filter, &url, cancel_token, &mut file).await {
                 Ok(ConnEnd::Cancelled) => break,
                 Ok(ConnEnd::Eof) => {
                     reconnect_count += 1;
@@ -532,7 +409,7 @@ async fn record_inner(
                         info!("Stream ended.");
                         break;
                     }
-                    downloader.mark_reconnect();
+                    filter.mark_reconnect();
                     backoff(reconnect_count).await;
                 }
                 Err(e) => {
@@ -541,22 +418,9 @@ async fn record_inner(
                     if reconnect_count > max_reconnects {
                         break;
                     }
-                    downloader.mark_reconnect();
+                    filter.mark_reconnect();
                     backoff(reconnect_count).await;
                 }
-            }
-        }
-
-        if format == Format::Mp4 {
-            info!("Remuxing FLV -> MP4 via ffmpeg...");
-            tokio::task::spawn_blocking({
-                let tmp = download_path.clone();
-                let dest = dest.clone();
-                move || remux_flv_to_mp4(&tmp, &dest)
-            })
-            .await??;
-            if let Err(e) = std::fs::remove_file(&download_path) {
-                warn!("Failed to remove temp file: {e}");
             }
         }
     }

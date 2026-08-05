@@ -53,10 +53,10 @@ pub async fn run() -> anyhow::Result<()> {
                         .required(true)
                         .value_parser(value_parser!(i64)),
                     Arg::new("format")
-                        .help("Output format: wav, mp3, flac, mp4, or flv")
+                        .help("Output format: wav, mp3, flac, or flv")
                         .long("format")
                         .short('f')
-                        .value_parser(["wav", "mp3", "flac", "mp4", "flv"]),
+                        .value_parser(["wav", "mp3", "flac", "flv"]),
                     Arg::new("output")
                         .help("Output file path (default: auto-generated)")
                         .long("output")
@@ -123,7 +123,6 @@ pub async fn run() -> anyhow::Result<()> {
                     "wav" => record::Format::Wav,
                     "mp3" => record::Format::Mp3,
                     "flac" => record::Format::Flac,
-                    "mp4" => record::Format::Mp4,
                     "flv" => record::Format::Flv,
                     s => anyhow::bail!("unsupported format: {s}"),
                 },
@@ -138,7 +137,7 @@ pub async fn run() -> anyhow::Result<()> {
                         Some(fmt) => fmt,
                         None => anyhow::bail!(
                             "Must specify either -f/--format or -o with a recognised extension \
-                             (wav, mp3, flac, mp4, flv)"
+                             (wav, mp3, flac, flv)"
                         ),
                     }
                 }
