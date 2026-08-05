@@ -103,17 +103,8 @@ async fn get_stream_url_legacy(real_room_id: i64, qn: u32) -> Result<String> {
 }
 
 /// Poll until the streamer goes live (status == 1).
-/// Returns an error if the optional timeout expires.
-pub async fn wait_for_live(
-    real_room_id: i64,
-    timeout: Option<std::time::Duration>,
-) -> Result<()> {
-    let start = std::time::Instant::now();
+pub async fn wait_for_live(real_room_id: i64) -> Result<()> {
     loop {
-        if let Some(timeout) = timeout
-            && start.elapsed() > timeout {
-                anyhow::bail!("Timeout waiting for stream to go live");
-            }
         match get_live_status(real_room_id).await {
             Ok(1) => {
                 info!("Stream is now live!");

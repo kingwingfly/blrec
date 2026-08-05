@@ -279,7 +279,6 @@ impl DownloadRecorder {
             if cancel_token.is_cancelled() {
                 return Ok(ConnEnd::Cancelled);
             }
-
             tokio::select! {
                 chunk = stream.next() => {
                     match chunk {
@@ -297,9 +296,7 @@ impl DownloadRecorder {
                         }
                     }
                 }
-                _ = tokio::time::sleep(Duration::from_secs(5)) => {
-                    // Periodic keep-alive — could check live status here
-                }
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {}
             }
         }
 
@@ -311,48 +308,24 @@ impl DownloadRecorder {
     }
 }
 
-// ── MP4 remux helper ────────────────────────────────────────────────
+// ── MP4 remux (spawn ffmpeg CLI) ────────────────────────────────────
 
 fn remux_flv_to_mp4(flv_path: &Path, mp4_path: &Path) -> Result<()> {
-    ffmpeg_next::init()?;
+    let status = std::process::Command::new("ffmpeg")
+        .args([
+            "-v", "error",
+            "-i", &flv_path.to_string_lossy(),
+            "-c", "copy",
+            "-movflags", "+faststart",
+            "-y",
+            &mp4_path.to_string_lossy(),
+        ])
+        .status()
+        .context("Failed to spawn ffmpeg for remux")?;
 
-    let mut ictx = ffmpeg_next::format::input(
-        &flv_path.to_string_lossy().into_owned(),
-    )
-    .context("Failed to open temp FLV for remux")?;
-
-    let mut octx = ffmpeg_next::format::output_as(
-        &mp4_path.to_string_lossy().into_owned(),
-        "mp4",
-    )?;
-
-    let mut stream_map: Vec<(usize, usize)> = Vec::new();
-
-    for stream in ictx.streams() {
-        let params = stream.parameters();
-        let codec_id: ffmpeg_next::codec::Id = params.id();
-        let codec = ffmpeg_next::codec::encoder::find(codec_id)
-            .context(format!("Codec not found for stream: {:?}", codec_id))?;
-
-        let mut out_stream = octx.add_stream(codec)?;
-        out_stream.set_parameters(params);
-        out_stream.set_time_base(stream.time_base());
-
-        stream_map.push((stream.index(), out_stream.index()));
+    if !status.success() {
+        anyhow::bail!("ffmpeg remux exited with {status}");
     }
-
-    octx.write_header()?;
-
-    for (in_stream, packet) in ictx.packets() {
-        let in_idx = in_stream.index();
-        if let Some(&(_, out_idx)) = stream_map.iter().find(|(i, _)| *i == in_idx) {
-            let mut pkt = packet.clone();
-            pkt.set_stream(out_idx);
-            pkt.write_interleaved(&mut octx)?;
-        }
-    }
-
-    octx.write_trailer()?;
     info!("Remuxed FLV -> MP4: {}", mp4_path.display());
     Ok(())
 }
@@ -373,10 +346,25 @@ pub async fn record(
     let real_id = live::resolve_room_id(room_id).await?;
     info!("Room {room_id} resolved to real ID {real_id}");
 
-    live::wait_for_live(real_id, timeout).await?;
+    let work = record_inner(real_id, format, output, quality, no_video, no_audio);
+    if let Some(t) = timeout {
+        tokio::time::timeout(t, work).await?
+    } else {
+        work.await
+    }
+}
+
+async fn record_inner(
+    real_id: i64,
+    format: Format,
+    output: Option<String>,
+    quality: u32,
+    no_video: bool,
+    no_audio: bool,
+) -> Result<()> {
+    live::wait_for_live(real_id).await?;
 
     let dest = output_path(real_id, format, output.as_deref())?;
-    let start_time = std::time::Instant::now();
     let cancel_token = tokio_util::sync::CancellationToken::new();
 
     let ct = cancel_token.clone();
@@ -391,17 +379,9 @@ pub async fn record(
 
     if format.is_audio_only() {
         // ── Audio-only path (wav / mp3 / flac) ──
-        let recorder = Arc::new(Mutex::new(
-            AudioRecorder::new(&dest, format)?
-        ));
+        let recorder = Arc::new(Mutex::new(AudioRecorder::new(&dest, format)?));
 
         loop {
-            if let Some(timeout) = timeout
-                && start_time.elapsed() > timeout
-            {
-                info!("Timeout reached.");
-                break;
-            }
             if cancel_token.is_cancelled() {
                 info!("Cancelled.");
                 break;
@@ -414,7 +394,8 @@ pub async fn record(
             let tok = cancel_token.clone();
             let result = tokio::task::spawn_blocking(move || {
                 rec.blocking_lock().record_connection(&url, &tok)
-            }).await??;
+            })
+            .await??;
 
             match result {
                 ConnEnd::Cancelled => break,
@@ -439,12 +420,8 @@ pub async fn record(
         let keep_audio = !no_audio;
         let keep_video = !no_video;
 
-        // For MP4: download FLV to temp, remux at end
-        // For FLV: download directly to destination
         let download_path = if format == Format::Mp4 {
-            let tmp = dest.with_extension("tmp.flv");
-            info!("Downloading FLV to temp: {}", tmp.display());
-            tmp
+            dest.with_extension("tmp.flv")
         } else {
             dest.clone()
         };
@@ -452,12 +429,6 @@ pub async fn record(
         let mut downloader = DownloadRecorder::new(&download_path, keep_audio, keep_video);
 
         loop {
-            if let Some(timeout) = timeout
-                && start_time.elapsed() > timeout
-            {
-                info!("Timeout reached.");
-                break;
-            }
             if cancel_token.is_cancelled() {
                 info!("Cancelled.");
                 break;
@@ -484,7 +455,9 @@ pub async fn record(
                 Err(e) => {
                     error!("Download error: {e}");
                     reconnect_count += 1;
-                    if reconnect_count > max_reconnects { break; }
+                    if reconnect_count > max_reconnects {
+                        break;
+                    }
                     downloader.mark_reconnect();
                     backoff(reconnect_count).await;
                 }
@@ -492,13 +465,13 @@ pub async fn record(
         }
 
         if format == Format::Mp4 {
-            info!("Remuxing FLV -> MP4...");
+            info!("Remuxing FLV -> MP4 via ffmpeg...");
             tokio::task::spawn_blocking({
                 let tmp = download_path.clone();
                 let dest = dest.clone();
                 move || remux_flv_to_mp4(&tmp, &dest)
-            }).await??;
-            // Clean up temp file
+            })
+            .await??;
             if let Err(e) = std::fs::remove_file(&download_path) {
                 warn!("Failed to remove temp file: {e}");
             }
@@ -510,28 +483,25 @@ pub async fn record(
     Ok(())
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────
-
 async fn fetch_url(real_id: i64, quality: u32) -> Result<String> {
-    live::get_stream_url(real_id, quality).await
-}
-
-async fn still_live(real_id: i64) -> bool {
-    match live::get_live_status(real_id).await {
-        Ok(1) => {
-            info!("Stream still live, reconnecting...");
-            true
-        }
-        Ok(0) => false,
-        Ok(_) => true, // looping — keep going
-        Err(e) => {
-            warn!("Status check error: {e}");
-            true // assume still live on error
+    loop {
+        match live::get_stream_url(real_id, quality).await {
+            Ok(url) => return Ok(url),
+            Err(e) => {
+                if !still_live(real_id).await {
+                    anyhow::bail!("Stream ended while fetching URL");
+                }
+                warn!("URL fetch failed: {e}. Retrying...");
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            }
         }
     }
 }
 
+async fn still_live(real_id: i64) -> bool {
+    matches!(live::get_live_status(real_id).await, Ok(1 | 2))
+}
+
 async fn backoff(attempt: u32) {
-    let secs = (1u64 << attempt.min(5)).min(30);
-    tokio::time::sleep(Duration::from_secs(secs)).await;
+    tokio::time::sleep(Duration::from_secs((1u64 << attempt.min(5)).min(30))).await;
 }
