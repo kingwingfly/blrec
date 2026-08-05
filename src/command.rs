@@ -29,7 +29,7 @@ pub async fn run() -> anyhow::Result<()> {
                 .about("Pipe raw FLV stream to stdout (for ffmpeg / ffplay)")
                 .arg_required_else_help(true)
                 .args([
-                    Arg::new("streamer_id")
+                    Arg::new("room_id")
                         .help("Bilibili room ID (short or real)")
                         .required(true)
                         .value_parser(value_parser!(i64)),
@@ -48,7 +48,7 @@ pub async fn run() -> anyhow::Result<()> {
                 .about("Record audio from live stream to file")
                 .arg_required_else_help(true)
                 .args([
-                    Arg::new("streamer_id")
+                    Arg::new("room_id")
                         .help("Bilibili room ID (short or real)")
                         .required(true)
                         .value_parser(value_parser!(i64)),
@@ -91,7 +91,7 @@ pub async fn run() -> anyhow::Result<()> {
             _ => unreachable!(),
         },
         Some(("pipe", sub_matches)) => {
-            let id = *sub_matches.get_one::<i64>("streamer_id").unwrap();
+            let id = *sub_matches.get_one::<i64>("room_id").unwrap();
             let quality = *sub_matches.get_one::<u32>("quality").unwrap();
             let timeout = sub_matches
                 .get_one::<u64>("timeout")
@@ -99,7 +99,7 @@ pub async fn run() -> anyhow::Result<()> {
             pipe::pipe(id, quality, timeout).await?;
         }
         Some(("record", sub_matches)) => {
-            let id = *sub_matches.get_one::<i64>("streamer_id").unwrap();
+            let id = *sub_matches.get_one::<i64>("room_id").unwrap();
             let format_str = sub_matches.get_one::<String>("format").unwrap().as_str();
             let output = sub_matches
                 .get_one::<String>("output")
