@@ -249,12 +249,11 @@ pub async fn record(
 
     loop {
         // Check timeout
-        if let Some(timeout) = timeout {
-            if start_time.elapsed() > timeout {
+        if let Some(timeout) = timeout
+            && start_time.elapsed() > timeout {
                 info!("Timeout reached.");
                 break;
             }
-        }
         if cancel_token.is_cancelled() {
             info!("Cancelled.");
             break;

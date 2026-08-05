@@ -24,12 +24,11 @@ pub async fn listen(
 
     loop {
         // Check timeout
-        if let Some(timeout) = timeout {
-            if start_time.elapsed() > timeout {
+        if let Some(timeout) = timeout
+            && start_time.elapsed() > timeout {
                 info!("Timeout reached, stopping.");
                 break;
             }
-        }
 
         // Get fresh stream URL
         let url = match live::get_stream_url(real_id, quality).await {
@@ -102,12 +101,11 @@ pub async fn listen(
                         Ok(_) => {} // still live or looping
                         Err(e) => warn!("Status check error: {e}"),
                     }
-                    if let Some(timeout) = timeout {
-                        if start_time.elapsed() > timeout {
+                    if let Some(timeout) = timeout
+                        && start_time.elapsed() > timeout {
                             info!("Timeout reached.");
                             return Ok(());
                         }
-                    }
                 }
             }
         }

@@ -33,11 +33,10 @@ pub async fn get_live_status(real_room_id: i64) -> Result<i32> {
 /// Tries the modern API first, falls back to the legacy API.
 pub async fn get_stream_url(real_room_id: i64, qn: u32) -> Result<String> {
     // Try modern API first
-    if let Ok(url) = get_stream_url_modern(real_room_id, qn).await {
-        if !url.is_empty() {
+    if let Ok(url) = get_stream_url_modern(real_room_id, qn).await
+        && !url.is_empty() {
             return Ok(url);
         }
-    }
     // Fallback to legacy API
     get_stream_url_legacy(real_room_id, qn).await
 }
@@ -111,11 +110,10 @@ pub async fn wait_for_live(
 ) -> Result<()> {
     let start = std::time::Instant::now();
     loop {
-        if let Some(timeout) = timeout {
-            if start.elapsed() > timeout {
+        if let Some(timeout) = timeout
+            && start.elapsed() > timeout {
                 anyhow::bail!("Timeout waiting for stream to go live");
             }
-        }
         match get_live_status(real_room_id).await {
             Ok(1) => {
                 info!("Stream is now live!");
