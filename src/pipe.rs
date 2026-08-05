@@ -7,6 +7,9 @@ use tracing::{error, info, warn};
 use crate::flv::FlvStripper;
 use crate::live;
 
+const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15";
+const REFERER: &str = "https://www.bilibili.com/";
+
 pub async fn pipe(
     short_id: i64,
     quality: u32,
@@ -16,7 +19,13 @@ pub async fn pipe(
 
     let work = pipe_inner(real_id, quality);
     if let Some(t) = timeout {
-        tokio::time::timeout(t, work).await?
+        match tokio::time::timeout(t, work).await {
+            Ok(res) => res,
+            Err(_elapsed) => {
+                info!("Timeout reached, stopping.");
+                Ok(())
+            }
+        }
     } else {
         work.await
     }
@@ -48,8 +57,24 @@ async fn pipe_inner(real_id: i64, quality: u32) -> Result<()> {
 
         info!("Connecting to stream (reconnect #{reconnect_count})...");
         let client = reqwest::Client::new();
-        let resp = match client.get(&url).send().await {
-            Ok(r) => r,
+        let resp = match client
+            .get(&url)
+            .header("Referer", REFERER)
+            .header("User-Agent", USER_AGENT)
+            .send()
+            .await
+        {
+            Ok(r) => {
+                // Check for CDN error pages (status != 2xx)
+                if !r.status().is_success() {
+                    let status = r.status();
+                    let body = r.text().await.unwrap_or_default();
+                    error!("CDN returned {status}: {body:.200}");
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    continue;
+                }
+                r
+            }
             Err(e) => {
                 error!("Failed to connect: {e}");
                 tokio::time::sleep(Duration::from_secs(3)).await;

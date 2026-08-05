@@ -314,6 +314,7 @@ fn remux_flv_to_mp4(flv_path: &Path, mp4_path: &Path) -> Result<()> {
     let status = std::process::Command::new("ffmpeg")
         .args([
             "-v", "error",
+            "-fflags", "+genpts+igndts",
             "-i", &flv_path.to_string_lossy(),
             "-c", "copy",
             "-movflags", "+faststart",
@@ -346,12 +347,27 @@ pub async fn record(
     let real_id = live::resolve_room_id(room_id).await?;
     info!("Room {room_id} resolved to real ID {real_id}");
 
-    let work = record_inner(real_id, format, output, quality, no_video, no_audio);
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+
+    // Ctrl+C
+    let ct = cancel_token.clone();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        info!("Ctrl+C received, finishing...");
+        ct.cancel();
+    });
+
+    // Timeout
     if let Some(t) = timeout {
-        tokio::time::timeout(t, work).await?
-    } else {
-        work.await
+        let ct = cancel_token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(t).await;
+            info!("Timeout reached, finishing...");
+            ct.cancel();
+        });
     }
+
+    record_inner(real_id, format, output, quality, no_video, no_audio, &cancel_token).await
 }
 
 async fn record_inner(
@@ -361,18 +377,11 @@ async fn record_inner(
     quality: u32,
     no_video: bool,
     no_audio: bool,
+    cancel_token: &tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     live::wait_for_live(real_id).await?;
 
     let dest = output_path(real_id, format, output.as_deref())?;
-    let cancel_token = tokio_util::sync::CancellationToken::new();
-
-    let ct = cancel_token.clone();
-    tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.ok();
-        info!("Ctrl+C received, finishing...");
-        ct.cancel();
-    });
 
     let mut reconnect_count = 0u32;
     let max_reconnects = 20;
@@ -437,7 +446,7 @@ async fn record_inner(
             let url = fetch_url(real_id, quality).await?;
             info!("Connecting (reconnect #{reconnect_count})...");
 
-            match downloader.record_connection(&url, &cancel_token).await {
+            match downloader.record_connection(&url, cancel_token).await {
                 Ok(ConnEnd::Cancelled) => break,
                 Ok(ConnEnd::Eof) => {
                     reconnect_count += 1;
