@@ -98,7 +98,13 @@ async fn pipe_inner(real_id: i64, quality: u32) -> Result<()> {
                                 }
                                 return Err(e.into());
                             }
-                            stdout.flush().await?;
+                            if let Err(e) = stdout.flush().await {
+                                if e.kind() == std::io::ErrorKind::BrokenPipe {
+                                    info!("Pipe closed by downstream, exiting.");
+                                    return Ok(());
+                                }
+                                return Err(e.into());
+                            }
                         }
                         Some(Err(e)) => {
                             error!("Stream error: {e}");
