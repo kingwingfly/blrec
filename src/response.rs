@@ -33,6 +33,7 @@ pub struct NavResp {
     pub data: NavData,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct NavData {
     #[serde(default, rename = "isLogin")]
@@ -57,6 +58,7 @@ pub struct RoomInitResp {
     pub data: RoomInitData,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct RoomInitData {
     pub room_id: i64,
@@ -74,6 +76,7 @@ pub struct RoomInfoResp {
     pub data: RoomInfoData,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct RoomInfoData {
     #[serde(default)]
@@ -139,6 +142,7 @@ pub struct PlayFormat {
     pub codec: Vec<PlayCodec>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct PlayCodec {
     #[serde(default)]
