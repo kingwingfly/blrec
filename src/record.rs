@@ -311,68 +311,66 @@ impl DownloadRecorder {
 
 // ── FLV trimming + MP4 remux ────────────────────────────────────────
 
-/// Trim trailing garbage from a truncated FLV file by finding the last
-/// valid tag boundary and discarding everything after it.
+/// Trim trailing garbage from a truncated FLV file by forward-parsing
+/// to find the last complete tag.  Forward parsing is unaffected by
+/// PreviousTagSize drift caused by FlvFilter dropping tags.
 fn trim_flv(path: &Path) -> Result<()> {
     let mut file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
     let file_len = file.metadata()?.len();
-    if file_len < 4 {
+    if file_len < 13 {
         return Ok(());
     }
 
-    // Search the last 256 KB for the last valid PreviousTagSize
-    let window = 262_144usize.min(file_len as usize);
-    file.seek(SeekFrom::End(-(window as i64)))?;
+    // Parse the last 512 KB forward
+    let window = 524_288usize.min(file_len as usize);
+    let start = file_len - window as u64;
+    file.seek(SeekFrom::Start(start))?;
     let mut buf = vec![0u8; window];
     file.read_exact(&mut buf)?;
 
-    // Walk backwards looking for a valid PreviousTagSize → tag header pair
-    let mut i = buf.len();
-    while i >= 15 {
-        i -= 1;
-        if i < 4 {
-            break;
-        }
-        // 4-byte big-endian PreviousTagSize
-        let pts = u32::from_be_bytes([buf[i - 3], buf[i - 2], buf[i - 1], buf[i]]);
-        // PreviousTagSize = 11 (header) + data_size, must be ≥ 11
-        if !(11..=10_000_000).contains(&pts) {
-            continue;
-        }
+    let mut last_valid: Option<usize> = None;
+    let mut offset = 0usize;
 
-        let tag_end = i + 1; // byte after PreviousTagSize
-        let tag_start = match tag_end.checked_sub(4 + pts as usize) {
-            Some(s) if s >= 11 => s, // need room for tag header
-            _ => continue,
-        };
-        // Validate tag type (0x08=audio, 0x09=video, 0x12=script)
-        let tag_type = buf[tag_start] & 0x1F;
+    // Skip FLV header if present at start of file
+    if start == 0 && buf.len() >= 13 && &buf[0..3] == b"FLV" {
+        offset = 13;
+    }
+
+    while offset + 15 <= buf.len() {
+        let tag_type = buf[offset] & 0x1F;
         if tag_type != 0x08 && tag_type != 0x09 && tag_type != 0x12 {
+            offset += 1;
             continue;
         }
-        // Validate data_size in tag header matches PreviousTagSize - 11
-        let data_size = ((buf[tag_start + 1] as usize) << 16)
-            | ((buf[tag_start + 2] as usize) << 8)
-            | (buf[tag_start + 3] as usize);
-        if 11 + data_size + 4 != pts as usize {
+        let data_size = ((buf[offset + 1] as usize) << 16)
+            | ((buf[offset + 2] as usize) << 8)
+            | (buf[offset + 3] as usize);
+        if data_size == 0 || data_size > 10_000_000 {
+            offset += 1;
             continue;
         }
-        // stream_id must be 0
-        if buf[tag_start + 8] != 0 || buf[tag_start + 9] != 0 || buf[tag_start + 10] != 0 {
+        let tag_end = offset + 11 + data_size + 4;
+        if tag_end > buf.len() {
+            break; // incomplete trailing tag — trim here
+        }
+        if buf[offset + 8] != 0 || buf[offset + 9] != 0 || buf[offset + 10] != 0 {
+            offset += 1;
             continue;
         }
+        last_valid = Some(start as usize + tag_end);
+        offset = tag_end;
+    }
 
-        let valid_len = file_len - window as u64 + tag_end as u64;
+    if let Some(valid_len) = last_valid {
+        let valid_len = valid_len as u64;
         if valid_len < file_len {
             file.set_len(valid_len)?;
             let dropped = file_len - valid_len;
             info!("Trimmed {dropped} trailing bytes from FLV (now {valid_len})");
         }
-        return Ok(());
+    } else {
+        tracing::debug!("No valid FLV tags found in last {window} bytes");
     }
-
-    // No valid boundary found — file may be too short or too corrupt
-    tracing::debug!("Could not find valid FLV tag boundary for trimming");
     Ok(())
 }
 
