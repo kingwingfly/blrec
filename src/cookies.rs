@@ -35,21 +35,31 @@ pub fn current_cookies() -> Result<String> {
 }
 
 pub fn auth_file_path() -> std::path::PathBuf {
-    std::path::PathBuf::from(".blarec").join("auth.json")
+    std::path::PathBuf::from(".blrec").join("auth.json")
 }
 
 pub fn save_auth(mid: i64, name: &str) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
     let cookies = current_cookies()?;
     let path = auth_file_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
     }
     let data = AuthFile {
         mid,
         name: name.to_string(),
         cookies,
     };
-    std::fs::write(&path, serde_json::to_string_pretty(&data)?)?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&path)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(serde_json::to_string_pretty(&data)?.as_bytes())?;
     tracing::info!("Auth saved to {}", path.display());
     Ok(())
 }
