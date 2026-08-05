@@ -311,27 +311,47 @@ impl DownloadRecorder {
 // ── MP4 remux (spawn ffmpeg CLI) ────────────────────────────────────
 
 fn remux_flv_to_mp4(flv_path: &Path, mp4_path: &Path) -> Result<()> {
-    let output = std::process::Command::new("ffmpeg")
+    // Two-pass pipeline: first ffmpeg gracefully stops at the last valid
+    // frame (discarding trailing garbage from truncation), second remuxes to MP4.
+    let mut clean = std::process::Command::new("ffmpeg")
         .args([
             "-v", "error",
             "-err_detect", "ignore_err",
-            "-fflags", "+discardcorrupt+genpts+igndts",
             "-i", &flv_path.to_string_lossy(),
+            "-c", "copy",
+            "-f", "flv",
+            "pipe:",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("Failed to spawn ffmpeg (clean pass)")?;
+
+    let remux = std::process::Command::new("ffmpeg")
+        .args([
+            "-v", "error",
+            "-f", "flv",
+            "-i", "pipe:",
             "-c", "copy",
             "-movflags", "+faststart",
             "-y",
             &mp4_path.to_string_lossy(),
         ])
+        .stdin(clean.stdout.take().context("Failed to capture clean stdout")?)
+        .stderr(std::process::Stdio::piped())
         .output()
-        .context("Failed to spawn ffmpeg for remux")?;
+        .context("Failed to spawn ffmpeg (remux pass)")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("ffmpeg remux failed: {stderr}");
+    let clean_status = clean.wait().context("Failed to wait on clean pass")?;
+    if !clean_status.success() {
+        anyhow::bail!("ffmpeg clean pass exited with {clean_status}");
     }
-    // Log ffmpeg stderr at debug level (warnings about truncated input are expected)
-    if !output.stderr.is_empty() {
-        tracing::debug!("ffmpeg: {}", String::from_utf8_lossy(&output.stderr).trim());
+    if !remux.status.success() {
+        let stderr = String::from_utf8_lossy(&remux.stderr);
+        anyhow::bail!("ffmpeg remux pass failed: {stderr}");
+    }
+    if !remux.stderr.is_empty() {
+        tracing::debug!("ffmpeg: {}", String::from_utf8_lossy(&remux.stderr).trim());
     }
     info!("Remuxed FLV -> MP4: {}", mp4_path.display());
     Ok(())
