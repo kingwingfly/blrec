@@ -311,9 +311,10 @@ impl DownloadRecorder {
 // ── MP4 remux (spawn ffmpeg CLI) ────────────────────────────────────
 
 fn remux_flv_to_mp4(flv_path: &Path, mp4_path: &Path) -> Result<()> {
-    let status = std::process::Command::new("ffmpeg")
+    let output = std::process::Command::new("ffmpeg")
         .args([
             "-v", "error",
+            "-err_detect", "ignore_err",
             "-fflags", "+genpts+igndts",
             "-i", &flv_path.to_string_lossy(),
             "-c", "copy",
@@ -321,11 +322,16 @@ fn remux_flv_to_mp4(flv_path: &Path, mp4_path: &Path) -> Result<()> {
             "-y",
             &mp4_path.to_string_lossy(),
         ])
-        .status()
+        .output()
         .context("Failed to spawn ffmpeg for remux")?;
 
-    if !status.success() {
-        anyhow::bail!("ffmpeg remux exited with {status}");
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("ffmpeg remux failed: {stderr}");
+    }
+    // Log ffmpeg stderr at debug level (warnings about truncated input are expected)
+    if !output.stderr.is_empty() {
+        tracing::debug!("ffmpeg: {}", String::from_utf8_lossy(&output.stderr).trim());
     }
     info!("Remuxed FLV -> MP4: {}", mp4_path.display());
     Ok(())
