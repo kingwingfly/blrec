@@ -311,9 +311,10 @@ impl DownloadRecorder {
 
 // ── FLV trimming + MP4 remux ────────────────────────────────────────
 
-/// Trim trailing garbage from a truncated FLV file by forward-parsing
-/// to find the last complete tag.  Forward parsing is unaffected by
-/// PreviousTagSize drift caused by FlvFilter dropping tags.
+/// Trim trailing garbage from a truncated FLV file.  Parses forward from
+/// byte 0, validating each tag's own PreviousTagSize (which is always
+/// `11 + data_size` even after FlvFilter), and truncates after the last
+/// complete tag.
 fn trim_flv(path: &Path) -> Result<()> {
     let mut file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
     let file_len = file.metadata()?.len();
@@ -321,20 +322,18 @@ fn trim_flv(path: &Path) -> Result<()> {
         return Ok(());
     }
 
-    // Parse the last 512 KB forward
-    let window = 524_288usize.min(file_len as usize);
-    let start = file_len - window as u64;
-    file.seek(SeekFrom::Start(start))?;
-    let mut buf = vec![0u8; window];
+    // Temp FLV files are small — read the whole thing
+    file.seek(SeekFrom::Start(0))?;
+    let mut buf = vec![0u8; file_len as usize];
     file.read_exact(&mut buf)?;
 
-    let mut last_valid: Option<usize> = None;
-    let mut offset = 0usize;
-
-    // Skip FLV header if present at start of file
-    if start == 0 && buf.len() >= 13 && &buf[0..3] == b"FLV" {
-        offset = 13;
+    if &buf[0..3] != b"FLV" {
+        tracing::debug!("FLV file missing header — not trimming");
+        return Ok(());
     }
+
+    let mut last_valid: u64 = 13; // after FLV header + first PreviousTagSize0
+    let mut offset = 13usize;
 
     while offset + 15 <= buf.len() {
         let tag_type = buf[offset] & 0x1F;
@@ -349,27 +348,33 @@ fn trim_flv(path: &Path) -> Result<()> {
             offset += 1;
             continue;
         }
-        let tag_end = offset + 11 + data_size + 4;
+        let pts_offset = offset + 11 + data_size;
+        let tag_end = pts_offset + 4;
         if tag_end > buf.len() {
-            break; // incomplete trailing tag — trim here
+            offset += 1;
+            continue;
         }
         if buf[offset + 8] != 0 || buf[offset + 9] != 0 || buf[offset + 10] != 0 {
             offset += 1;
             continue;
         }
-        last_valid = Some(start as usize + tag_end);
+        // Validate this tag's own PreviousTagSize (= 11 + data_size)
+        let pts = u32::from_be_bytes([
+            buf[pts_offset], buf[pts_offset + 1],
+            buf[pts_offset + 2], buf[pts_offset + 3],
+        ]);
+        if pts as usize != 11 + data_size {
+            offset += 1;
+            continue;
+        }
+        last_valid = tag_end as u64;
         offset = tag_end;
     }
 
-    if let Some(valid_len) = last_valid {
-        let valid_len = valid_len as u64;
-        if valid_len < file_len {
-            file.set_len(valid_len)?;
-            let dropped = file_len - valid_len;
-            info!("Trimmed {dropped} trailing bytes from FLV (now {valid_len})");
-        }
-    } else {
-        tracing::debug!("No valid FLV tags found in last {window} bytes");
+    if last_valid < file_len {
+        file.set_len(last_valid)?;
+        let dropped = file_len - last_valid;
+        info!("Trimmed {dropped} trailing bytes from FLV (now {last_valid})");
     }
     Ok(())
 }
