@@ -33,11 +33,8 @@ pub struct NavResp {
     pub data: NavData,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct NavData {
-    #[serde(default, rename = "isLogin")]
-    pub is_login: bool,
     pub mid: Option<i64>,
     pub uname: Option<String>,
 }
@@ -58,14 +55,9 @@ pub struct RoomInitResp {
     pub data: RoomInitData,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct RoomInitData {
     pub room_id: i64,
-    #[serde(default)]
-    pub short_id: i64,
-    #[serde(default)]
-    pub live_status: i32,
 }
 
 // ── Room info ──
@@ -76,13 +68,10 @@ pub struct RoomInfoResp {
     pub data: RoomInfoData,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct RoomInfoData {
     #[serde(default)]
     pub live_status: i32,
-    #[serde(default)]
-    pub live_time: String,
 }
 
 // ── Play URL (legacy) ──
@@ -142,13 +131,8 @@ pub struct PlayFormat {
     pub codec: Vec<PlayCodec>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct PlayCodec {
-    #[serde(default)]
-    pub current_qn: i32,
-    #[serde(default)]
-    pub accept_qn: Vec<i32>,
     pub base_url: String,
     #[serde(default)]
     pub url_info: Vec<UrlInfo>,
