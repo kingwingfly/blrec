@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -308,50 +309,94 @@ impl DownloadRecorder {
     }
 }
 
-// ── MP4 remux (spawn ffmpeg CLI) ────────────────────────────────────
+// ── FLV trimming + MP4 remux ────────────────────────────────────────
+
+/// Trim trailing garbage from a truncated FLV file by finding the last
+/// valid tag boundary and discarding everything after it.
+fn trim_flv(path: &Path) -> Result<()> {
+    let mut file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+    let file_len = file.metadata()?.len();
+    if file_len < 4 {
+        return Ok(());
+    }
+
+    // Search the last 256 KB for the last valid PreviousTagSize
+    let window = 262_144usize.min(file_len as usize);
+    file.seek(SeekFrom::End(-(window as i64)))?;
+    let mut buf = vec![0u8; window];
+    file.read_exact(&mut buf)?;
+
+    // Walk backwards looking for a valid PreviousTagSize → tag header pair
+    let mut i = buf.len();
+    while i >= 15 {
+        i -= 1;
+        if i < 4 {
+            break;
+        }
+        // 4-byte big-endian PreviousTagSize
+        let pts = u32::from_be_bytes([buf[i - 3], buf[i - 2], buf[i - 1], buf[i]]);
+        // PreviousTagSize = 11 (header) + data_size, must be ≥ 11
+        if !(11..=10_000_000).contains(&pts) {
+            continue;
+        }
+
+        let tag_end = i + 1; // byte after PreviousTagSize
+        let tag_start = match tag_end.checked_sub(4 + pts as usize) {
+            Some(s) if s >= 11 => s, // need room for tag header
+            _ => continue,
+        };
+        // Validate tag type (0x08=audio, 0x09=video, 0x12=script)
+        let tag_type = buf[tag_start] & 0x1F;
+        if tag_type != 0x08 && tag_type != 0x09 && tag_type != 0x12 {
+            continue;
+        }
+        // Validate data_size in tag header matches PreviousTagSize - 11
+        let data_size = ((buf[tag_start + 1] as usize) << 16)
+            | ((buf[tag_start + 2] as usize) << 8)
+            | (buf[tag_start + 3] as usize);
+        if 11 + data_size + 4 != pts as usize {
+            continue;
+        }
+        // stream_id must be 0
+        if buf[tag_start + 8] != 0 || buf[tag_start + 9] != 0 || buf[tag_start + 10] != 0 {
+            continue;
+        }
+
+        let valid_len = file_len - window as u64 + tag_end as u64;
+        if valid_len < file_len {
+            file.set_len(valid_len)?;
+            let dropped = file_len - valid_len;
+            info!("Trimmed {dropped} trailing bytes from FLV (now {valid_len})");
+        }
+        return Ok(());
+    }
+
+    // No valid boundary found — file may be too short or too corrupt
+    tracing::debug!("Could not find valid FLV tag boundary for trimming");
+    Ok(())
+}
 
 fn remux_flv_to_mp4(flv_path: &Path, mp4_path: &Path) -> Result<()> {
-    // Two-pass pipeline: first ffmpeg gracefully stops at the last valid
-    // frame (discarding trailing garbage from truncation), second remuxes to MP4.
-    let mut clean = std::process::Command::new("ffmpeg")
-        .args([
-            "-v", "error",
-            "-err_detect", "ignore_err",
-            "-i", &flv_path.to_string_lossy(),
-            "-c", "copy",
-            "-f", "flv",
-            "pipe:",
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .context("Failed to spawn ffmpeg (clean pass)")?;
+    trim_flv(flv_path)?;
 
-    let remux = std::process::Command::new("ffmpeg")
+    let output = std::process::Command::new("ffmpeg")
         .args([
             "-v", "error",
-            "-f", "flv",
-            "-i", "pipe:",
+            "-i", &flv_path.to_string_lossy(),
             "-c", "copy",
             "-movflags", "+faststart",
             "-y",
             &mp4_path.to_string_lossy(),
         ])
-        .stdin(clean.stdout.take().context("Failed to capture clean stdout")?)
-        .stderr(std::process::Stdio::piped())
         .output()
-        .context("Failed to spawn ffmpeg (remux pass)")?;
+        .context("Failed to spawn ffmpeg for remux")?;
 
-    let clean_status = clean.wait().context("Failed to wait on clean pass")?;
-    if !clean_status.success() {
-        anyhow::bail!("ffmpeg clean pass exited with {clean_status}");
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("ffmpeg remux failed: {stderr}");
     }
-    if !remux.status.success() {
-        let stderr = String::from_utf8_lossy(&remux.stderr);
-        anyhow::bail!("ffmpeg remux pass failed: {stderr}");
-    }
-    if !remux.stderr.is_empty() {
-        tracing::debug!("ffmpeg: {}", String::from_utf8_lossy(&remux.stderr).trim());
+    if !output.stderr.is_empty() {
+        tracing::debug!("ffmpeg: {}", String::from_utf8_lossy(&output.stderr).trim());
     }
     info!("Remuxed FLV -> MP4: {}", mp4_path.display());
     Ok(())
