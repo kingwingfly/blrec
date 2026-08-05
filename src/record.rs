@@ -315,7 +315,7 @@ fn remux_flv_to_mp4(flv_path: &Path, mp4_path: &Path) -> Result<()> {
         .args([
             "-v", "error",
             "-err_detect", "ignore_err",
-            "-fflags", "+genpts+igndts",
+            "-fflags", "+discardcorrupt+genpts+igndts",
             "-i", &flv_path.to_string_lossy(),
             "-c", "copy",
             "-movflags", "+faststart",
