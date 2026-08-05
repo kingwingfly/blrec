@@ -1,25 +1,22 @@
-# blarec — Bilibili Live Audio Recorder
+# blrec — Bilibili Live Recorder
 
-Record audio from [Bilibili](https://live.bilibili.com) live streams.
+Record audio from [Bilibili](https://live.bilibili.com) live streams, or pipe the
+raw FLV stream to external tools like `ffmpeg` / `ffplay`.
 
 ## Installation
 
-**Requirements:** FFmpeg 8.x shared libraries (`libavcodec`, `libavformat`, `libavutil`,
-`libswresample`).
+**Requirements:** FFmpeg 8.x shared libraries (`libavcodec`, `libavformat`,
+`libavutil`, `libswresample`).
 
 | OS | Install |
 |---|---|
 | Arch | `pacman -S ffmpeg` |
 | Debian / Ubuntu | `apt install libavcodec-dev libavformat-dev libavutil-dev libswresample-dev` |
-| macOS | `brew install ffmpeg@8` |
-
-Build:
 
 ```bash
 cargo build --release
+# binary at target/release/blrec
 ```
-
-The binary is at `target/release/blarec`.
 
 ## Authentication
 
@@ -29,63 +26,75 @@ Credentials are stored at `.blarec/auth.json`.
 ### QR code login
 
 ```bash
-blarec auth login
+blrec auth login
 ```
 
 Scan the QR code displayed in the terminal with the Bilibili mobile app.
 
-### Login with browser cookies
+### Cookie login
 
 ```bash
-blarec auth use-cookies "SESSDATA=xxx; bili_jct=yyy; DedeUserID=zzz"
+blrec auth use-cookies "SESSDATA=xxx; bili_jct=yyy; DedeUserID=zzz"
 ```
 
-Copy the full cookie header from your browser's developer tools.
-At minimum `SESSDATA` is required; `bili_jct` is also needed for logout.
-
-### Check & logout
+Copy the full cookie header from your browser's developer tools (at minimum
+`SESSDATA`; `bili_jct` is also needed for logout).
 
 ```bash
-blarec auth check     # verify stored cookies are valid
-blarec auth logout    # clear stored credentials
+blrec auth check     # verify stored cookies are valid
+blrec auth logout    # clear stored credentials
 ```
 
 ## Usage
 
-### `listen` — pipe raw audio to ffmpeg
+### `pipe` — raw FLV to stdout
 
-Stream raw FLV bytes to stdout so an external `ffmpeg` process can encode them:
+Pipe the full HTTP-FLV stream (audio + video) to stdout so external tools can
+process it. All status messages go to **stderr**.
 
 ```bash
-# Record to FLAC
-blarec listen 12345 | ffmpeg -f flv -i - -c:a flac "$(date +%Y%m%d_%H%M%S).flac"
+# Watch live stream
+blrec pipe 12345 | ffplay -f flv -
 
-# Record to MP3 (320 kbps)
-blarec listen 12345 | ffmpeg -f flv -i - -vn -c:a libmp3lame -b:a 320k output.mp3
+# Record audio only (FLAC)
+blrec pipe 12345 | ffmpeg -f flv -i - -vn -c:a flac "$(date +%Y%m%d_%H%M%S).flac"
 
-# Extract raw AAC (no re-encode)
-blarec listen 12345 | ffmpeg -f flv -i - -vn -c:a copy output.aac
+# Record audio only (MP3, 320 kbps)
+blrec pipe 12345 | ffmpeg -f flv -i - -vn -c:a libmp3lame -b:a 320k output.mp3
+
+# Record audio only (raw AAC, no re-encode)
+blrec pipe 12345 | ffmpeg -f flv -i - -vn -c:a copy output.aac
+
+# Record video + audio (remux to MP4)
+blrec pipe 12345 | ffmpeg -f flv -i - -c copy output.mp4
+
+# Record video + re-encode audio to AAC
+blrec pipe 12345 | ffmpeg -f flv -i - -c:v copy -c:a aac -b:a 192k output.mp4
+
+# Record video only (no audio)
+blrec pipe 12345 | ffmpeg -f flv -i - -an -c:v copy output.mp4
 ```
 
-> **Important:** Always use `-f flv -i -` — Bilibili delivers audio in AAC inside
-> an HTTP-FLV container. The stream URL is fetched automatically.
+> **Important:** Use `-f flv -i -` — Bilibili streams are HTTP-FLV with AAC audio
+> and H.264 video.
 
-### `record` — direct to file (internal ffmpeg)
+### `record` — audio directly to file
 
-Encodes with the system FFmpeg libraries — no external `ffmpeg` binary needed.
+Encodes audio with the system FFmpeg libraries — no external `ffmpeg` binary
+needed. Uses the same reconnection logic as `pipe`.
 
 ```bash
 # WAV  (PCM 16-bit, 48 kHz stereo)
-blarec record 12345 -f wav
+blrec record 12345 -f wav
 
 # MP3  (192 kbps)
-blarec record 12345 -f mp3
+blrec record 12345 -f mp3
 
 # FLAC (lossless)
-blarec record 12345 -f flac
+blrec record 12345 -f flac
 
-# Custom output path and auto-stop
-blarec record 12345 -f mp3 -o my_recording.mp3 --timeout 60
+# Custom output path and auto-stop after 60 seconds
+blrec record 12345 -f mp3 -o my_recording.mp3 --timeout 60
 ```
 
 Output files are auto-named `{room_id}_{YYYYmmdd_HHMMSS}.{ext}` unless `-o` is
@@ -103,10 +112,10 @@ given.
 | Event | Behaviour |
 |---|---|
 | Stream offline | Poll every 5 s until live (or timeout) |
-| Stream goes live | Start / resume recording |
+| Stream goes live | Start / resume |
 | Stream ends | Clean exit, finalise output file |
 | Network drop / URL rotation | Reconnect with exponential backoff (1 s → 30 s max) |
-| Pipe broken (`listen`) | Clean exit (downstream ffmpeg exited) |
+| Pipe broken (`pipe`) | Clean exit (downstream process closed stdin) |
 | Ctrl+C (`record`) | Flush buffered audio, write trailer, exit |
 
 ## How it works
@@ -114,18 +123,10 @@ given.
 1. **Room resolution** — short ID → real room ID via `room/v1/Room/room_init`
 2. **Live detection** — polls `room/v1/Room/get_info` every 5 s for `live_status`
 3. **Stream URL** — `xlive/web-room/v2/index/getRoomPlayInfo` (modern) with
-   fallback to `room/v1/Room/playUrl` (legacy)
-4. **Audio** — AAC inside HTTP-FLV, fetched with `reqwest` (`listen`) or
-   demuxed directly by FFmpeg (`record`)
-5. **Encoding** — `ffmpeg-next` crate links system FFmpeg libraries for
-   AAC → PCM → WAV / MP3 / FLAC
-
-## Example: scheduled recording
-
-```bash
-# Record a 30-minute clip starting at 20:00
-blarec record 12345 -f flac --timeout 1800
-```
+   fallback to `room/v1/Room/playUrl` (legacy). CDN requires `Referer` header.
+4. **`pipe`** — `reqwest` streams FLV bytes directly to stdout
+5. **`record`** — FFmpeg demuxes FLV, decodes AAC, resamples, encodes to
+   WAV / MP3 / FLAC. Encoder + muxer persist across reconnections.
 
 ## License
 

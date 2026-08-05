@@ -7,6 +7,9 @@ use tracing::{error, info, warn};
 
 use crate::live;
 
+const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15";
+const REFERER: &str = "https://www.bilibili.com/";
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Format {
     Wav,
@@ -15,7 +18,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub fn codec_name(self) -> &'static str {
+    fn codec_name(self) -> &'static str {
         match self {
             Format::Wav => "pcm_s16le",
             Format::Mp3 => "libmp3lame",
@@ -23,7 +26,7 @@ impl Format {
         }
     }
 
-    pub fn muxer_name(self) -> &'static str {
+    fn muxer_name(self) -> &'static str {
         match self {
             Format::Wav => "wav",
             Format::Mp3 => "mp3",
@@ -31,7 +34,7 @@ impl Format {
         }
     }
 
-    pub fn extension(self) -> &'static str {
+    fn extension(self) -> &'static str {
         match self {
             Format::Wav => "wav",
             Format::Mp3 => "mp3",
@@ -49,16 +52,22 @@ fn output_path(real_room_id: i64, format: Format, output: Option<String>) -> Res
     Ok(PathBuf::from(filename))
 }
 
+fn http_headers_dict() -> ffmpeg_next::Dictionary<'static> {
+    let mut dict = ffmpeg_next::Dictionary::new();
+    let headers = format!(
+        "Referer: {}\r\nUser-Agent: {}\r\n",
+        REFERER, USER_AGENT
+    );
+    dict.set("headers", &headers);
+    dict
+}
+
 /// Persistent recorder: encoder + muxer + output file survive across
-/// reconnections.  Only the demuxer / decoder / resampler are recreated
+/// reconnections. Only the demuxer / decoder / resampler are recreated
 /// per connection.
 struct Recorder {
     encoder: ffmpeg_next::codec::encoder::audio::Encoder,
     output: ffmpeg_next::format::context::Output,
-    #[allow(dead_code)]
-    format: Format,
-    #[allow(dead_code)]
-    encoder_rate: i32,
 }
 
 impl Recorder {
@@ -69,30 +78,31 @@ impl Recorder {
             .context(format!("Codec '{}' not found", format.codec_name()))?;
 
         let ctx = ffmpeg_next::codec::context::Context::new_with_codec(codec);
-        let mut audio_enc = ctx.encoder().audio()?;
+        let mut a_enc = ctx.encoder().audio()?;
 
         let rate = 48000;
-        audio_enc.set_rate(rate);
-        audio_enc.set_channel_layout(ffmpeg_next::ChannelLayout::STEREO);
+        a_enc.set_rate(rate);
+        a_enc.set_channel_layout(ffmpeg_next::ChannelLayout::STEREO);
 
+        // libmp3lame needs planar (fltp / s16p / s32p), not packed
         let sample_fmt = match format {
             Format::Wav => {
                 ffmpeg_next::format::Sample::I16(ffmpeg_next::format::sample::Type::Packed)
             }
             Format::Mp3 => {
-                ffmpeg_next::format::Sample::F32(ffmpeg_next::format::sample::Type::Packed)
+                ffmpeg_next::format::Sample::F32(ffmpeg_next::format::sample::Type::Planar)
             }
             Format::Flac => {
                 ffmpeg_next::format::Sample::I16(ffmpeg_next::format::sample::Type::Packed)
             }
         };
-        audio_enc.set_format(sample_fmt);
+        a_enc.set_format(sample_fmt);
 
         if matches!(format, Format::Mp3) {
-            audio_enc.set_bit_rate(192_000);
+            a_enc.set_bit_rate(192_000);
         }
 
-        let encoder = audio_enc.open_as(codec)?;
+        let encoder = a_enc.open_as(codec)?;
 
         let mut output = ffmpeg_next::format::output_as(
             path.to_str().context("invalid output path")?,
@@ -111,12 +121,7 @@ impl Recorder {
             path.display()
         );
 
-        Ok(Self {
-            encoder,
-            output,
-            format,
-            encoder_rate: rate,
-        })
+        Ok(Self { encoder, output })
     }
 
     /// Process one connection (one stream URL).
@@ -127,8 +132,9 @@ impl Recorder {
     ) -> Result<ConnEnd> {
         info!("Opening stream: {}...", &url[..60.min(url.len())]);
 
-        let mut ictx =
-            ffmpeg_next::format::input(&url).context("Failed to open stream URL")?;
+        let dict = http_headers_dict();
+        let mut ictx = ffmpeg_next::format::input_with_dictionary(&url, dict)
+            .context("Failed to open stream URL — CDN requires a Referer header")?;
 
         let audio_stream = ictx
             .streams()
@@ -147,7 +153,6 @@ impl Recorder {
             decoder.format(),
         );
 
-        // Resample to match encoder expectations
         let mut resampler = ffmpeg_next::software::resampling::Context::get(
             decoder.format(),
             decoder.channel_layout(),
@@ -239,7 +244,7 @@ pub async fn record(
     let ct = cancel_token.clone();
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
-        info!("Ctrl+C received, finishing…");
+        info!("Ctrl+C received, finishing...");
         ct.cancel();
     });
 
@@ -248,36 +253,35 @@ pub async fn record(
     let max_reconnects = 20;
 
     loop {
-        // Check timeout
         if let Some(timeout) = timeout
-            && start_time.elapsed() > timeout {
-                info!("Timeout reached.");
-                break;
-            }
+            && start_time.elapsed() > timeout
+        {
+            info!("Timeout reached.");
+            break;
+        }
         if cancel_token.is_cancelled() {
             info!("Cancelled.");
             break;
         }
 
-        // Get stream URL
         let url = match live::get_stream_url(real_id, quality).await {
             Ok(url) => url,
             Err(e) => {
                 match live::get_live_status(real_id).await {
-                    Ok(1) => warn!("Still live but URL fetch failed: {e}. Retrying…"),
+                    Ok(1) => warn!("Still live but URL fetch failed: {e}. Retrying..."),
                     Ok(0) => {
                         info!("Stream ended.");
                         break;
                     }
-                    Ok(s) => warn!("Unknown live_status={s}: {e}. Retrying…"),
-                    Err(e2) => warn!("Status check failed: {e2}. Retrying…"),
+                    Ok(s) => warn!("Unknown live_status={s}: {e}. Retrying..."),
+                    Err(e2) => warn!("Status check failed: {e2}. Retrying..."),
                 }
                 tokio::time::sleep(Duration::from_secs(3)).await;
                 continue;
             }
         };
 
-        info!("Connecting (reconnect #{reconnect_count})…");
+        info!("Connecting (reconnect #{reconnect_count})...");
 
         let rec = recorder.clone();
         let tok = cancel_token.clone();
@@ -303,7 +307,7 @@ pub async fn record(
                         break;
                     }
                     Ok(1) => {
-                        info!("Stream still live, reconnecting…");
+                        info!("Stream still live, reconnecting...");
                     }
                     Ok(_) => {}
                     Err(e) => warn!("Status check error: {e}"),
@@ -315,7 +319,6 @@ pub async fn record(
         }
     }
 
-    // Write trailer
     let rec = recorder.clone();
     tokio::task::spawn_blocking(move || rec.blocking_lock().finish()).await??;
 

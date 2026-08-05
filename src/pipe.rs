@@ -6,7 +6,7 @@ use tracing::{error, info, warn};
 use crate::flv::FlvStripper;
 use crate::live;
 
-pub async fn listen(
+pub async fn pipe(
     short_id: i64,
     quality: u32,
     timeout: Option<std::time::Duration>,

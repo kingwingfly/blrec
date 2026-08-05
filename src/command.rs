@@ -1,6 +1,6 @@
 use clap::{command, value_parser, Arg, ArgAction, Command};
 
-use crate::{auth, listen, record};
+use crate::{auth, pipe, record};
 
 pub async fn run() -> anyhow::Result<()> {
     let mut cmd = command!()
@@ -25,8 +25,8 @@ pub async fn run() -> anyhow::Result<()> {
                     Command::new("logout").about("Logout and clear stored cookies"),
                     Command::new("check").about("Check if stored cookies are still valid"),
                 ]),
-            Command::new("listen")
-                .about("Stream raw FLV audio to stdout (pipe to ffmpeg)")
+            Command::new("pipe")
+                .about("Pipe raw FLV stream to stdout (for ffmpeg / ffplay)")
                 .arg_required_else_help(true)
                 .args([
                     Arg::new("streamer_id")
@@ -40,12 +40,12 @@ pub async fn run() -> anyhow::Result<()> {
                         .value_parser(value_parser!(u32))
                         .default_value("150"),
                     Arg::new("timeout")
-                        .help("Max recording duration in seconds")
+                        .help("Max duration in seconds")
                         .long("timeout")
                         .value_parser(value_parser!(u64)),
                 ]),
             Command::new("record")
-                .about("Record audio directly to file via ffmpeg")
+                .about("Record audio from live stream to file")
                 .arg_required_else_help(true)
                 .args([
                     Arg::new("streamer_id")
@@ -90,13 +90,13 @@ pub async fn run() -> anyhow::Result<()> {
             Some(("check", _)) => auth::check().await?,
             _ => unreachable!(),
         },
-        Some(("listen", sub_matches)) => {
+        Some(("pipe", sub_matches)) => {
             let id = *sub_matches.get_one::<i64>("streamer_id").unwrap();
             let quality = *sub_matches.get_one::<u32>("quality").unwrap();
             let timeout = sub_matches
                 .get_one::<u64>("timeout")
                 .map(|t| std::time::Duration::from_secs(*t));
-            listen::listen(id, quality, timeout).await?;
+            pipe::pipe(id, quality, timeout).await?;
         }
         Some(("record", sub_matches)) => {
             let id = *sub_matches.get_one::<i64>("streamer_id").unwrap();
