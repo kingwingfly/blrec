@@ -45,7 +45,7 @@ pub async fn run() -> anyhow::Result<()> {
                         .value_parser(value_parser!(u64)),
                 ]),
             Command::new("record")
-                .about("Record audio from live stream to file")
+                .about("Record live stream to file")
                 .arg_required_else_help(true)
                 .args([
                     Arg::new("room_id")
@@ -53,11 +53,10 @@ pub async fn run() -> anyhow::Result<()> {
                         .required(true)
                         .value_parser(value_parser!(i64)),
                     Arg::new("format")
-                        .help("Output audio format: wav, mp3, or flac")
+                        .help("Output format: wav, mp3, flac, mp4, or flv")
                         .long("format")
                         .short('f')
-                        .required(true)
-                        .value_parser(["wav", "mp3", "flac"]),
+                        .value_parser(["wav", "mp3", "flac", "mp4", "flv"]),
                     Arg::new("output")
                         .help("Output file path (default: auto-generated)")
                         .long("output")
@@ -73,6 +72,14 @@ pub async fn run() -> anyhow::Result<()> {
                         .help("Max recording duration in seconds")
                         .long("timeout")
                         .value_parser(value_parser!(u64)),
+                    Arg::new("no-video")
+                        .help("Skip video track (audio only)")
+                        .long("no-video")
+                        .action(ArgAction::SetTrue),
+                    Arg::new("no-audio")
+                        .help("Skip audio track (video only)")
+                        .long("no-audio")
+                        .action(ArgAction::SetTrue),
                 ]),
         ]);
 
@@ -100,7 +107,6 @@ pub async fn run() -> anyhow::Result<()> {
         }
         Some(("record", sub_matches)) => {
             let id = *sub_matches.get_one::<i64>("room_id").unwrap();
-            let format_str = sub_matches.get_one::<String>("format").unwrap().as_str();
             let output = sub_matches
                 .get_one::<String>("output")
                 .map(|s| s.to_owned());
@@ -108,14 +114,52 @@ pub async fn run() -> anyhow::Result<()> {
             let timeout = sub_matches
                 .get_one::<u64>("timeout")
                 .map(|t| std::time::Duration::from_secs(*t));
+            let no_video = sub_matches.get_flag("no-video");
+            let no_audio = sub_matches.get_flag("no-audio");
 
-            let fmt = match format_str {
-                "wav" => record::Format::Wav,
-                "mp3" => record::Format::Mp3,
-                "flac" => record::Format::Flac,
-                s => anyhow::bail!("unsupported format: {s}. Use wav, mp3, or flac"),
+            // Resolve format: -f flag > -o extension > error
+            let format = match sub_matches.get_one::<String>("format") {
+                Some(f) => match f.as_str() {
+                    "wav" => record::Format::Wav,
+                    "mp3" => record::Format::Mp3,
+                    "flac" => record::Format::Flac,
+                    "mp4" => record::Format::Mp4,
+                    "flv" => record::Format::Flv,
+                    s => anyhow::bail!("unsupported format: {s}"),
+                },
+                None => {
+                    // Try to infer from output path extension
+                    match output.as_deref().and_then(|o| {
+                        std::path::Path::new(o)
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .and_then(record::Format::from_ext)
+                    }) {
+                        Some(fmt) => fmt,
+                        None => anyhow::bail!(
+                            "Must specify either -f/--format or -o with a recognised extension \
+                             (wav, mp3, flac, mp4, flv)"
+                        ),
+                    }
+                }
             };
-            record::record(id, fmt, output, quality, timeout).await?;
+
+            // If both -f and -o given with recognisable extension, they must agree
+            if let Some(ref out) = output
+                && let Some(ext) = std::path::Path::new(out)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    && let Some(inferred) = record::Format::from_ext(ext)
+                        && inferred != format {
+                            anyhow::bail!(
+                                "Format mismatch: -f {} but output extension is .{ext}",
+                                format.extension()
+                            );
+                        }
+
+            record::record(
+                id, format, output, quality, timeout, no_video, no_audio,
+            ).await?;
         }
         _ => unreachable!(),
     }

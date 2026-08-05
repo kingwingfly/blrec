@@ -78,12 +78,15 @@ blrec pipe 12345 | ffmpeg -f flv -i - -an -c:v copy output.mp4
 > **Important:** Use `-f flv -i -` — Bilibili streams are HTTP-FLV with AAC audio
 > and H.264 video.
 
-### `record` — audio directly to file
+### `record` — record to file
 
-Encodes audio with the system FFmpeg libraries — no external `ffmpeg` binary
-needed. Uses the same reconnection logic as `pipe`.
+Encodes audio or saves video with the system FFmpeg libraries — no external
+`ffmpeg` binary needed. Format may be given explicitly (`-f`) or inferred from
+the output file extension.
 
 ```bash
+# ── Audio-only ──────────────────────────────────────────
+
 # WAV  (PCM 16-bit, 48 kHz stereo)
 blrec record 12345 -f wav
 
@@ -93,12 +96,32 @@ blrec record 12345 -f mp3
 # FLAC (lossless)
 blrec record 12345 -f flac
 
-# Custom output path and auto-stop after 60 seconds
-blrec record 12345 -f mp3 -o my_recording.mp3 --timeout 60
+# ── Video ──────────────────────────────────────────────
+
+# FLV  (raw stream copy, both audio + video)
+blrec record 12345 -f flv
+
+# MP4  (remuxed from FLV, both audio + video)
+blrec record 12345 -f mp4
+
+# Video only (no audio)
+blrec record 12345 -f mp4 --no-audio
+
+# Audio only in MP4 container
+blrec record 12345 -f mp4 --no-video
+
+# ── Convenience ─────────────────────────────────────────
+
+# Format inferred from output extension
+blrec record 12345 -o my_stream.flv
+blrec record 12345 -o my_stream.mp4
+
+# Auto-stop after 60 seconds
+blrec record 12345 -f mp3 --timeout 60
 ```
 
 Output files are auto-named `{room_id}_{YYYYmmdd_HHMMSS}.{ext}` unless `-o` is
-given.
+given.  `-f` and `-o` extension must agree when both are specified.
 
 ### Options
 
