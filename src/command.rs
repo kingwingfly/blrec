@@ -1,3 +1,4 @@
+use anyhow::Result;
 use clap::{command, value_parser, Arg, ArgAction, Command};
 
 use crate::{auth, pipe, record};
@@ -26,7 +27,7 @@ pub async fn run() -> anyhow::Result<()> {
                     Command::new("check").about("Check if stored cookies are still valid"),
                 ]),
             Command::new("pipe")
-                .about("Pipe raw FLV stream to stdout (for ffmpeg / ffplay)")
+                .about("Pipe raw FLV stream to stdout, or serve via TCP with -l/-p")
                 .arg_required_else_help(true)
                 .args([
                     Arg::new("room_id")
@@ -43,6 +44,16 @@ pub async fn run() -> anyhow::Result<()> {
                         .help("Max duration in seconds")
                         .long("timeout")
                         .value_parser(value_parser!(u64)),
+                    Arg::new("listen")
+                        .help("Listen on address[:port] (e.g. 127.0.0.1:3000). Use :0 for random port.")
+                        .long("listen")
+                        .short('l')
+                        .value_parser(value_parser!(String)),
+                    Arg::new("port")
+                        .help("TCP port, implies -l 127.0.0.1 if -l not given. Overrides port in -l.")
+                        .long("port")
+                        .short('p')
+                        .value_parser(value_parser!(u16)),
                 ]),
             Command::new("record")
                 .about("Record live stream to file")
@@ -103,7 +114,11 @@ pub async fn run() -> anyhow::Result<()> {
             let timeout = sub_matches
                 .get_one::<u64>("timeout")
                 .map(|t| std::time::Duration::from_secs(*t));
-            pipe::pipe(id, quality, timeout).await?;
+            let listen = sub_matches.get_one::<String>("listen");
+            let port = sub_matches.get_one::<u16>("port").copied();
+
+            let bind_addr = resolve_listen_addr(listen, port)?;
+            pipe::pipe(id, quality, timeout, bind_addr).await?;
         }
         Some(("record", sub_matches)) => {
             let id = *sub_matches.get_one::<i64>("room_id").unwrap();
@@ -163,4 +178,101 @@ pub async fn run() -> anyhow::Result<()> {
         _ => unreachable!(),
     }
     Ok(())
+}
+
+/// Resolve the bind address from `-l` and `-p` flags.
+///
+/// | `-l`       | `-p`  | result                |
+/// |------------|-------|-----------------------|
+/// | (none)     | (none)| `None` (stdout mode)  |
+/// | (none)     | 3000  | `127.0.0.1:3000`      |
+/// | `0.0.0.0:0`| (none)| `0.0.0.0:0` (random)  |
+/// | `127.0.0.1`| 3000  | `127.0.0.1:3000`      |
+/// | `127.0.0.1:3000` | 4000 | `127.0.0.1:4000` |
+fn resolve_listen_addr(listen: Option<&String>, port: Option<u16>) -> Result<Option<String>> {
+    match (listen, port) {
+        (None, None) => Ok(None),
+        (None, Some(p)) => Ok(Some(format!("127.0.0.1:{p}"))),
+        (Some(addr), port) => {
+            let colon_count = addr.chars().filter(|&c| c == ':').count();
+            // addr:port or [IPv6]:port
+            let has_port = addr.contains("]:") || colon_count == 1;
+            // IPv6 without brackets (e.g. ::1) — has colons but no port
+            let is_bare_ipv6 = colon_count >= 2 && !addr.starts_with('[');
+
+            if is_bare_ipv6 {
+                // Bare IPv6 — must provide port via -p
+                match port {
+                    Some(p) => Ok(Some(format!("[{addr}]:{p}"))),
+                    None => anyhow::bail!(
+                        "IPv6 address '{addr}' has no port. Use '[{addr}]:<port>' or --port/-p."
+                    ),
+                }
+            } else if has_port {
+                // addr already has a port
+                if let Some(p) = port {
+                    // -p overrides the port in -l
+                    let host = if let Some(bracket_end) = addr.find(']') {
+                        &addr[..=bracket_end]
+                    } else if let Some(colon) = addr.rfind(':') {
+                        &addr[..colon]
+                    } else {
+                        addr.as_str()
+                    };
+                    Ok(Some(format!("{host}:{p}")))
+                } else {
+                    Ok(Some(addr.clone()))
+                }
+            } else {
+                // addr has no port
+                match port {
+                    Some(p) => Ok(Some(format!("{addr}:{p}"))),
+                    None => anyhow::bail!(
+                        "'{addr}' has no port. Use '{addr}:<port>' or --port/-p."
+                    ),
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(s: &str) -> Option<String> { Some(s.to_string()) }
+
+    #[test]
+    fn test_resolve() {
+        // No listen, no port → stdout
+        assert_eq!(resolve_listen_addr(None, None).unwrap(), None);
+        // Port only → default loopback
+        assert_eq!(resolve_listen_addr(None, Some(3000)).unwrap(), s("127.0.0.1:3000"));
+        // Full addr:port
+        assert_eq!(resolve_listen_addr(s("127.0.0.1:3000").as_ref(), None).unwrap(), s("127.0.0.1:3000"));
+        // Random port
+        assert_eq!(resolve_listen_addr(s("0.0.0.0:0").as_ref(), None).unwrap(), s("0.0.0.0:0"));
+        // Host + separate port
+        assert_eq!(resolve_listen_addr(s("127.0.0.1").as_ref(), Some(3000)).unwrap(), s("127.0.0.1:3000"));
+        // Override port
+        assert_eq!(resolve_listen_addr(s("127.0.0.1:3000").as_ref(), Some(4000)).unwrap(), s("127.0.0.1:4000"));
+        // IPv6 bracketed
+        assert_eq!(resolve_listen_addr(s("[::1]:3000").as_ref(), None).unwrap(), s("[::1]:3000"));
+        // IPv6 bracketed + port override
+        assert_eq!(resolve_listen_addr(s("[::1]:3000").as_ref(), Some(4000)).unwrap(), s("[::1]:4000"));
+        // IPv6 bracketed, no port, -p provides it
+        assert_eq!(resolve_listen_addr(s("[::1]").as_ref(), Some(3000)).unwrap(), s("[::1]:3000"));
+        // Bare IPv6 + -p
+        assert_eq!(resolve_listen_addr(s("::1").as_ref(), Some(3000)).unwrap(), s("[::1]:3000"));
+        // Hostname:port
+        assert_eq!(resolve_listen_addr(s("localhost:3000").as_ref(), None).unwrap(), s("localhost:3000"));
+    }
+
+    #[test]
+    fn test_resolve_errors() {
+        // No port anywhere
+        assert!(resolve_listen_addr(s("127.0.0.1").as_ref(), None).is_err());
+        assert!(resolve_listen_addr(s("::1").as_ref(), None).is_err());
+        assert!(resolve_listen_addr(s("[::1]").as_ref(), None).is_err());
+    }
 }

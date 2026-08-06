@@ -3,5 +3,6 @@
 *.flac
 *.wav
 *.mp4
+*.flv
 .blrec/
 *.tmp.flv

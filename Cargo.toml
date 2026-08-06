@@ -6,7 +6,7 @@ description = "Record audio from Bilibili live streams"
 license = "MIT"
 
 [dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "io-util", "io-std", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "io-util", "io-std", "time", "net"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 futures-util = "0.3"
 clap = { version = "4.5", features = ["cargo", "wrap_help"] }
