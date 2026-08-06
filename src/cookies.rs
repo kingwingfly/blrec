@@ -1,5 +1,5 @@
 use anyhow::{Context as _, Result};
-use api_req::{CookieStore as _, COOKIE_JAR};
+use api_req::{COOKIE_JAR, CookieStore as _};
 use cookie::Cookie;
 use serde::{Deserialize, Serialize};
 

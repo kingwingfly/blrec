@@ -9,7 +9,7 @@ license = "MIT"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "io-util", "io-std", "time", "net"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 futures-util = "0.3"
-clap = { version = "4.5", features = ["cargo", "wrap_help"] }
+clap = { version = "4.5", features = ["cargo", "wrap_help", "derive"] }
 api_req = { version = "0.5", features = ["cookies"] }
 reqwest = { version = "0.13", features = ["stream"] }
 cookie = "0.18"

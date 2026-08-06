@@ -21,8 +21,10 @@ pub async fn resolve_room_id(short_id: i64) -> Result<i64> {
 
 /// Get live status: 0 = offline, 1 = live, 2 = looping.
 pub async fn get_live_status(real_room_id: i64) -> Result<i32> {
-    let resp: RoomInfoResp =
-        LiveApi::request(RoomInfoPayload { room_id: real_room_id }).await?;
+    let resp: RoomInfoResp = LiveApi::request(RoomInfoPayload {
+        room_id: real_room_id,
+    })
+    .await?;
     if resp.code != 0 {
         anyhow::bail!("Failed to get room info (code={})", resp.code);
     }
@@ -34,9 +36,10 @@ pub async fn get_live_status(real_room_id: i64) -> Result<i32> {
 pub async fn get_stream_url(real_room_id: i64, qn: u32) -> Result<String> {
     // Try modern API first
     if let Ok(url) = get_stream_url_modern(real_room_id, qn).await
-        && !url.is_empty() {
-            return Ok(url);
-        }
+        && !url.is_empty()
+    {
+        return Ok(url);
+    }
     // Fallback to legacy API
     get_stream_url_legacy(real_room_id, qn).await
 }
@@ -65,10 +68,7 @@ async fn get_stream_url_modern(real_room_id: i64, qn: u32) -> Result<String> {
                         if let Some(url_info) = codec.url_info.first() {
                             let url =
                                 format!("{}{}{}", url_info.host, codec.base_url, url_info.extra);
-                            info!(
-                                "Got stream URL (modern): {}...",
-                                &url[..60.min(url.len())]
-                            );
+                            info!("Got stream URL (modern): {}...", &url[..60.min(url.len())]);
                             return Ok(url);
                         }
                     }

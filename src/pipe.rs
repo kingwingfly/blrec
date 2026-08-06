@@ -1,11 +1,11 @@
 use anyhow::Result;
 use futures_util::StreamExt;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 use tracing::{debug, error, info, warn};
 
 use crate::flv::FlvStripper;
@@ -58,7 +58,10 @@ async fn pipe_stdout(real_id: i64, quality: u32) -> Result<()> {
             Err(e) => {
                 match live::get_live_status(real_id).await {
                     Ok(1) => warn!("Stream is live but URL fetch failed: {e}. Retrying..."),
-                    Ok(0) => { info!("Stream ended."); break; }
+                    Ok(0) => {
+                        info!("Stream ended.");
+                        break;
+                    }
                     Ok(_) => warn!("Could not determine status: {e}. Retrying..."),
                     Err(e) => warn!("Could not determine status: {e}. Retrying..."),
                 }
@@ -147,14 +150,18 @@ async fn pipe_stdout(real_id: i64, quality: u32) -> Result<()> {
         stripper.mark_reconnect();
 
         match live::get_live_status(real_id).await {
-            Ok(0) => { info!("Stream ended during reconnect."); break; }
+            Ok(0) => {
+                info!("Stream ended during reconnect.");
+                break;
+            }
             Ok(_) => {}
             Err(e) => warn!("Status check error before reconnect: {e}"),
         }
 
         tokio::time::sleep(Duration::from_secs(
             (1u64 << reconnect_count.min(5)).min(30),
-        )).await;
+        ))
+        .await;
     }
 
     Ok(())
@@ -208,9 +215,7 @@ async fn pipe_listen(real_id: i64, quality: u32, bind_addr: &str) -> Result<()> 
         let mut rx = tx.subscribe();
 
         tokio::spawn(async move {
-            if !meta_snapshot.is_empty()
-                && stream.write_all(&meta_snapshot).await.is_err()
-            {
+            if !meta_snapshot.is_empty() && stream.write_all(&meta_snapshot).await.is_err() {
                 debug!("Client {client_addr} disconnected during metadata send");
                 return;
             }

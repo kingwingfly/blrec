@@ -318,7 +318,16 @@ pub async fn record(
         });
     }
 
-    record_inner(real_id, format, output, quality, no_video, no_audio, &cancel_token).await
+    record_inner(
+        real_id,
+        format,
+        output,
+        quality,
+        no_video,
+        no_audio,
+        &cancel_token,
+    )
+    .await
 }
 
 async fn record_inner(

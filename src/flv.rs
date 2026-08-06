@@ -97,7 +97,8 @@ impl FlvFilter {
             };
 
             if keep && offset + total_tag_len <= stripped.len() {
-                self.buf.extend_from_slice(&stripped[offset..offset + total_tag_len]);
+                self.buf
+                    .extend_from_slice(&stripped[offset..offset + total_tag_len]);
             }
 
             offset += total_tag_len.min(stripped.len().saturating_sub(offset));

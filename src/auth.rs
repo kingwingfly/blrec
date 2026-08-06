@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
-use api_req::{error::ApiErr, ApiCaller as _};
-use qrcode::{render::unicode, QrCode};
+use api_req::{ApiCaller as _, error::ApiErr};
+use qrcode::{QrCode, render::unicode};
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 
@@ -93,10 +93,7 @@ pub async fn logout() -> Result<()> {
                 let LogoutResp { code, message } =
                     AuthApi::request(LogoutPayload { biliCSRF: jct }).await?;
                 if code != 0 {
-                    warn!(
-                        "Server logout may have failed (code={code}): {:?}",
-                        message
-                    );
+                    warn!("Server logout may have failed (code={code}): {:?}", message);
                 }
             } else {
                 warn!("No bili_jct cookie found — skipping server-side logout");
@@ -121,7 +118,8 @@ pub async fn check() -> Result<()> {
                 Ok(NavResp {
                     data:
                         NavData {
-                            mid: Some(resp_mid), ..
+                            mid: Some(resp_mid),
+                            ..
                         },
                     ..
                 }) if resp_mid == mid => {
