@@ -134,16 +134,80 @@ given.  `-f` and `-o` extension must agree when both are specified.
 | `-q, --quality <qn>` | Stream quality (default: 150 = 高清). 250 = 超清, 400 = 蓝光, 10000 = 原画 |
 | `--timeout <secs>` | Stop automatically after N seconds |
 
-## Stream events handled
+## Stream lifecycle & behaviour
 
-| Event | Behaviour |
+### What happens when…
+
+**…the stream hasn't started yet?**
+
+Both `pipe` and `record` call `wait_for_live()`, which polls the Bilibili API
+every 5 seconds until `live_status == 1`.  No output file is created, no bytes
+are written — the process simply waits (potentially forever, unless `--timeout`
+is set).
+
+```
+ INFO Stream offline, waiting...       (repeats every 5 s)
+ INFO Stream is now live!
+```
+
+**…the stream is live and recording?**
+
+| Format | What happens |
 |---|---|
-| Stream offline | Poll every 5 s until live (or timeout) |
-| Stream goes live | Start / resume |
-| Stream ends | Clean exit, finalise output file |
-| Network drop / URL rotation | Reconnect with exponential backoff (1 s → 30 s max) |
-| Pipe broken (`pipe`) | Clean exit (downstream process closed stdin) |
-| Ctrl+C (`record`) | Flush buffered audio, write trailer, exit |
+| FLV | Raw FLV bytes are streamed from the CDN and appended to the output file.  `FlvFilter` drops audio / video tags if `--no-audio` / `--no-video` is set. |
+| WAV / MP3 / FLAC | ffmpeg-next opens the stream URL, demuxes FLV, decodes AAC, resamples (48 kHz stereo), encodes to the target format, and writes via the muxer.  Encoder, resampler, and muxer **persist** across reconnections — only the input stream is reopened. |
+
+**…the streamer stops broadcasting?**
+
+| Path | Detection | Behaviour |
+|---|---|---|
+| `pipe` | Active: polls `get_live_status` every 5 s during streaming | Exits cleanly as soon as `live_status == 0` |
+| `record --format flv` | Passive: waits for the CDN to close the connection (EOF or error) | On EOF, checks `still_live()`.  If offline → clean exit.  If still live → reconnect. |
+| `record --format wav/mp3/flac` | ffmpeg `input_with_dictionary` hits EOF | Checks `still_live()`.  If offline → exits loop, calls `write_trailer()`, file is valid.  If still live → reconnects. |
+
+No zeroes or silence are ever written — when the stream ends the recording stops
+and the output file is finalised.
+
+> **Important:** `blrec record` makes **one recording per invocation**.  When the
+> stream ends the process exits.  It does **not** go back to waiting for the
+> streamer to start again.  To record a subsequent stream, run `blrec record`
+> again — it will create a new file (the auto-generated name includes a fresh
+> timestamp).
+
+**…the network drops or the CDN rotates the stream URL?**
+
+Reconnection with exponential backoff: **1 s → 2 s → 4 s → 8 s → 16 s → 30 s**
+(max), up to **20 attempts**.  On reconnect the `FlvStripper` / `FlvFilter`
+strips the duplicate FLV header and script-data tags so the concatenated byte
+stream stays valid.  For audio, ffmpeg is given the new URL and picks up where
+it left off.
+
+If all 20 reconnects are exhausted the process exits with an error.  Any data
+already written to the output file is kept.
+
+**…Ctrl+C is pressed?**
+
+| Format | Behaviour |
+|---|---|
+| FLV | `CancellationToken` is set; the download loop breaks immediately.  The `.flv` file is a valid truncated raw byte stream — no trailer is needed. |
+| WAV / MP3 / FLAC | The encoder drains buffered frames, the muxer writes the trailer, and the file is closed.  The result is a valid, playable truncated recording. |
+
+**…`--timeout` expires?**
+
+Same as Ctrl+C — the timeout spawn sets the same `CancellationToken`, so cleanup
+is identical.
+
+### Summary
+
+| Event | `pipe` | `record --format flv` | `record --format wav/mp3/flac` |
+|---|---|---|---|
+| Stream offline (before start) | Wait forever (poll / 5 s) | Wait forever (poll / 5 s) | Wait forever (poll / 5 s) |
+| Stream goes live | Start piping to stdout | Start appending to `.flv` | Start encoding to file |
+| Streamer stops | Detect via API (5 s poll), exit | Wait for CDN EOF, then exit | ffmpeg EOF, then exit |
+| Network drop | Reconnect (backoff, max 20) | Reconnect (backoff, max 20) | Reconnect (backoff, max 20) |
+| Pipe broken / downstream closes | Exit cleanly | N/A | N/A |
+| Ctrl+C | Stop immediately | Stop immediately (valid file) | Drain + write trailer (valid file) |
+| Timeout | Stop | Stop (valid file) | Drain + write trailer (valid file) |
 
 ## How it works
 
