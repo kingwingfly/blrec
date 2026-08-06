@@ -68,11 +68,18 @@ blrec pipe 12345 | ffmpeg -f flv -i - -vn -c:a copy output.aac
 # Record video + audio (remux to MP4)
 blrec pipe 12345 | ffmpeg -f flv -i - -c copy output.mp4
 
+# Record video + audio (remux to MKV)
+blrec pipe 12345 | ffmpeg -f flv -i - -c copy output.mkv
+
 # Record video + re-encode audio to AAC
 blrec pipe 12345 | ffmpeg -f flv -i - -c:v copy -c:a aac -b:a 192k output.mp4
 
 # Record video only (no audio)
 blrec pipe 12345 | ffmpeg -f flv -i - -an -c:v copy output.mp4
+
+# Serve live stream to multiple clients via TCP
+blrec pipe 12345 -l 127.0.0.1:3000
+# Then connect:  ffplay -f flv tcp://127.0.0.1:3000
 ```
 
 > **Important:** Use `-f flv -i -` — Bilibili streams are HTTP-FLV with AAC audio
@@ -101,20 +108,17 @@ blrec record 12345 -f flac
 # FLV  (raw stream copy, both audio + video)
 blrec record 12345 -f flv
 
-# MP4  (remuxed from FLV, both audio + video)
-blrec record 12345 -f mp4
-
 # Video only (no audio)
-blrec record 12345 -f mp4 --no-audio
+blrec record 12345 -f flv --no-audio
 
-# Audio only in MP4 container
-blrec record 12345 -f mp4 --no-video
+# Audio only (AAC in FLV container)
+blrec record 12345 -f flv --no-video
 
 # ── Convenience ─────────────────────────────────────────
 
 # Format inferred from output extension
 blrec record 12345 -o my_stream.flv
-blrec record 12345 -o my_stream.mp4
+blrec record 12345 -o my_stream.flv
 
 # Auto-stop after 60 seconds
 blrec record 12345 -f mp3 --timeout 60
