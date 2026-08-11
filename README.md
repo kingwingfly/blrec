@@ -134,6 +134,59 @@ given.  `-f` and `-o` extension must agree when both are specified.
 | `-q, --quality <qn>` | Stream quality (default: 150 = 高清). 250 = 超清, 400 = 蓝光, 10000 = 原画 |
 | `--timeout <secs>` | Stop automatically after N seconds |
 
+## Post-processing: transcode to AV1
+
+`blrec` never spawns external processes — recorded `.flv` files keep the
+original H.264 video untouched.  To shrink them afterwards, transcode to AV1
+with the `ffmpeg` CLI binary (same package as the shared libraries on most
+distros).  Check that your build has the encoder first:
+
+```bash
+ffmpeg -hide-banner -encoders | grep svtav1
+```
+
+```bash
+mkdir -p chuan
+VIDEO=12345_20260811_203000.flv
+
+ffmpeg -i "$VIDEO" \
+  -c:v libsvtav1 -crf 32 -preset 6 \
+  -svtav1-params keyint=3s:enable-variance-boost=1 \
+  -pix_fmt yuv420p10le \
+  -c:a copy \
+  -movflags +faststart \
+  "chuan/${VIDEO%.flv}.mp4"
+```
+
+The output must be `.mp4` (or `.mkv`) — FLV cannot carry an AV1 track.
+
+| Flag | Why |
+|---|---|
+| `-c:v libsvtav1` | SVT-AV1 encoder — fast enough for long stream VODs |
+| `-crf 32 -preset 6` | Quality/speed balance; lower CRF = better quality, lower preset = slower but smaller |
+| `keyint=3s` | Keyframe every 3 seconds, framerate-independent — keeps output seekable |
+| `enable-variance-boost=1` | Allocates more bits to flat/dark areas — helps with typical stream backgrounds |
+| `-pix_fmt yuv420p10le` | 10-bit internally reduces banding even from 8-bit sources |
+| `-c:a copy` | Stream-copies the AAC audio — no generational loss, no extra time |
+| `-movflags +faststart` | Moves the MP4 index to the front for instant playback/streaming |
+
+Batch a directory of recordings (`fish`):
+
+```fish
+mkdir -p chuan
+for f in *.flv
+    ffmpeg -i "$f" -c:v libsvtav1 -crf 32 -preset 6 \
+      -svtav1-params keyint=3s:enable-variance-boost=1 \
+      -pix_fmt yuv420p10le -c:a copy -movflags +faststart \
+      "chuan/$(string replace .flv .mp4 $f)"
+end
+```
+
+In `bash`: `for f in *.flv; do ffmpeg -i "$f" … "chuan/${f%.flv}.mp4"; done`.
+
+Record first, transcode later — SVT-AV1 at these settings is generally not
+realtime.
+
 ## Stream lifecycle & behaviour
 
 ### What happens when…
