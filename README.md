@@ -146,7 +146,7 @@ ffmpeg -hide-banner -encoders | grep svtav1
 ```
 
 ```bash
-mkdir -p chuan
+mkdir -p output
 VIDEO=12345_20260811_203000.flv
 
 ffmpeg -i "$VIDEO" \
@@ -155,7 +155,7 @@ ffmpeg -i "$VIDEO" \
   -pix_fmt yuv420p10le \
   -c:a copy \
   -movflags +faststart \
-  "chuan/${VIDEO%.flv}.mp4"
+  "output/${VIDEO%.flv}.mp4"
 ```
 
 The output must be `.mp4` (or `.mkv`) — FLV cannot carry an AV1 track.
@@ -170,19 +170,29 @@ The output must be `.mp4` (or `.mkv`) — FLV cannot carry an AV1 track.
 | `-c:a copy` | Stream-copies the AAC audio — no generational loss, no extra time |
 | `-movflags +faststart` | Moves the MP4 index to the front for instant playback/streaming |
 
-Batch a directory of recordings (`fish`):
+Batch a directory of recordings with [`fd`](https://github.com/sharkdp/fd) —
+no shell loop, and `{/.}` strips exactly one trailing extension:
 
-```fish
-mkdir -p chuan
-for f in *.flv
-    ffmpeg -i "$f" -c:v libsvtav1 -crf 32 -preset 6 \
-      -svtav1-params keyint=3s:enable-variance-boost=1 \
-      -pix_fmt yuv420p10le -c:a copy -movflags +faststart \
-      "chuan/$(string replace .flv .mp4 $f)"
-end
+```bash
+mkdir -p output
+fd -e flv -j 1 -x ffmpeg -i {} \
+  -c:v libsvtav1 -crf 32 -preset 6 \
+  -svtav1-params keyint=3s:enable-variance-boost=1 \
+  -pix_fmt yuv420p10le \
+  -c:a copy \
+  -movflags +faststart \
+  output/{/.}.mp4
 ```
 
-In `bash`: `for f in *.flv; do ffmpeg -i "$f" … "chuan/${f%.flv}.mp4"; done`.
+`-j 1` runs one encode at a time — SVT-AV1 already saturates every core, so the
+default parallel `-x` would just thrash.  Filenames with spaces are safe: `fd`
+execs directly without a shell.
+
+> Do **not** build the output name with a plain substring replacement such as
+> fish's `string replace .flv .mp4 $f` — it rewrites the *first* match anywhere
+> in the name, so `a.flv.bak.flv` becomes `a.mp4.bak.flv`, still ending in
+> `.flv`.  Use `{/.}` (`fd`), `${f%.flv}` (bash suffix removal), or
+> `path change-extension mp4 $f` (fish).
 
 Record first, transcode later — SVT-AV1 at these settings is generally not
 realtime.
