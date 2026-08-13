@@ -339,7 +339,14 @@ async fn record_inner(
     no_audio: bool,
     cancel_token: &tokio_util::sync::CancellationToken,
 ) -> Result<()> {
-    live::wait_for_live(real_id).await?;
+    // Wait for the stream to start, but bail out on Ctrl+C / timeout.
+    tokio::select! {
+        result = live::wait_for_live(real_id) => result?,
+        _ = cancel_token.cancelled() => {
+            info!("Cancelled while waiting for stream to start.");
+            return Ok(());
+        }
+    }
 
     let dest = output_path(real_id, format, output.as_deref())?;
 
