@@ -9,7 +9,7 @@ cargo build --release     # binary at target/release/blrec
 cargo run -- <args>       # run with arguments
 ```
 
-**System requirement:** FFmpeg 8 shared libraries (`libavcodec`, `libavformat`, `libavutil`, `libswresample`). The `ffmpeg-next` crate links against these at build time.
+**System requirement:** FFmpeg 9 shared libraries (`libavcodec`, `libavformat`, `libavutil`, `libswresample`). The `ffmpeg-next` crate links against these at build time.
 
 There are no tests, no lint configuration, and no CI in this repository.
 

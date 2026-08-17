@@ -5,8 +5,9 @@ raw FLV stream to external tools like `ffmpeg` / `ffplay`.
 
 ## Installation
 
-**Requirements:** FFmpeg 8.x shared libraries (`libavcodec`, `libavformat`,
-`libavutil`, `libswresample`).
+**Requirements:** FFmpeg 9.x shared libraries (`libavcodec`, `libavformat`,
+`libavutil`, `libswresample`). 8.x also works — `ffmpeg-next` detects the
+installed version at build time.
 
 | OS | Install |
 |---|---|
